@@ -1,0 +1,26 @@
+# compiled output
+/dist
+/node_modules
+
+# local file storage driver (STORAGE_DRIVER=local)
+/uploads
+
+# logs
+*.log
+npm-debug.log*
+
+# env
+.env
+
+# IDE
+.idea
+.vscode
+
+# OS
+.DS_Store
+
+# tests
+/coverage
+
+# local browser-automation artifacts
+.playwright-mcp
