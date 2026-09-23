@@ -1,0 +1,55 @@
+# NOT ACTIVE: GitHub only runs *.yml / *.yaml files in this folder.
+# Template for a future deploy pipeline. To enable: rename to cd.yml, pick a
+# registry and deploy target, and add the secrets listed in README (CI/CD).
+name: CD
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write # only for GHCR
+
+jobs:
+  publish-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Option A: GitHub Container Registry, uses the built-in GITHUB_TOKEN.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Option B: another registry (Docker Hub, ECR, ...):
+      # - uses: docker/login-action@v3
+      #   with:
+      #     registry: ${{ vars.DOCKER_REGISTRY }}
+      #     username: ${{ secrets.DOCKER_REGISTRY_USER }}
+      #     password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+
+  deploy:
+    needs: publish-image
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers in repo settings
+    steps:
+      # Example for AWS (ECS/EC2/…): credentials come from repository secrets.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Roll out the new image
+        run: |
+          echo "TODO - roll out ghcr.io/${{ github.repository }}:${{ github.ref_name }}"
+      # Run `npm run migration:run` against production (DB_* secrets)
+      # before switching traffic to the new version.

@@ -1,5 +1,7 @@
 # sn-test — REST API социальной сети
 
+[![CI](https://github.com/Zenich75/sntest/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Zenich75/sntest/actions/workflows/ci.yml)
+
 Бэкенд социальной сети на NestJS: регистрация с подтверждением email, сессионная авторизация,
 посты с фото/видео, комментарии, лайки, подписки, поиск пользователей и публичные профили.
 
@@ -167,6 +169,7 @@ CSRF-куку. Иначе passport сохранил бы её обратно с 
 ```bash
 npm test            # unit-тесты
 npm run test:e2e    # e2e: нужны PostgreSQL и Redis (S3 не нужен)
+npm run lint:check  # eslint без --fix (как в CI)
 ```
 
 `test/hardening.e2e-spec.ts` проверяет поиск со спецсимволами и стабильность пагинации,
@@ -212,6 +215,48 @@ CSRF и лимиты. В остальных e2e-тестах троттлинг 
   значит, появилась новая ESM-only зависимость: добавьте `<pkg>` в `transformIgnorePatterns`.
   Незаметно это не сломается: `file-type` выполняется в e2e-тестах загрузки, и без трансформации
   такие тесты падают. После перехода на Node ≥ 24.9 весь этот обход можно удалить.
+
+## CI/CD
+
+GitHub Actions, файл `.github/workflows/ci.yml`. Запускается на push и pull request в `main`/`master`.
+
+| Job | Зависит от | Что делает |
+|---|---|---|
+| `lint-and-build` | | `npm ci`, `npm run lint:check`, `npm run build` |
+| `unit-tests` | lint-and-build | `npm test` |
+| `e2e-tests` | lint-and-build | сервисы `postgres:15-alpine` + `redis:7-alpine` с healthcheck, `npm run migration:run`, `npm run test:e2e` |
+| `docker-build` | lint-and-build | `docker build . -t sn-test:ci`, без публикации |
+
+- Node 22, `npm ci` и кэш npm (`actions/setup-node`, `cache: npm`) по `package-lock.json`.
+- В CI используется `lint:check`, а не `lint`: `npm run lint` запускается с `--fix`, так что в CI он
+  молча исправил бы ошибки и прошёл.
+- Секреты для CI не нужны. Все переменные в e2e-job тестовые и заданы прямо в workflow. AWS и SMTP
+  в тестах не вызываются: `test/e2e-env.ts` включает локальное хранилище и отключает отправку
+  писем, а `FilesService` подменён моком.
+- `.dockerignore` не даёт попасть в образ `.env`, `node_modules` и `dist` с машины, где идёт сборка.
+
+**Задел под деплой (пока не реализован).** Шаблон лежит в `.github/workflows/cd.yml.example`.
+GitHub его не запускает, потому что расширение не `.yml`. Шаблон собирает образ по тегу `v*`,
+публикует его в GHCR и содержит заглушку деплоя в AWS. Чтобы включить, переименуйте файл в `cd.yml`
+и добавьте в Settings → Secrets and variables → Actions:
+
+| Имя | Тип | Для чего |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | secret | деплой в AWS (ECS/EC2) |
+| `AWS_REGION` | variable | регион деплоя |
+| `DOCKER_REGISTRY_USER`, `DOCKER_REGISTRY_TOKEN` | secret | только для реестра не на GHCR (Docker Hub, ECR…) |
+| `DOCKER_REGISTRY` | variable | адрес такого реестра |
+| `SESSION_SECRET`, `DB_*`, `REDIS_*`, `MAIL_*`, `AWS_S3_BUCKET`, `CLOUDFRONT_DOMAIN` | secret | окружение продакшена, если его задаёт pipeline, а не платформа |
+
+Для GHCR хватает встроенного `GITHUB_TOKEN`. Для environment `production` в настройках репозитория
+стоит включить обязательное одобрение.
+
+**Рекомендуемая защита ветки** (Settings → Branches → rule для `main`). В этой задаче правило не
+настраивалось:
+- запретить прямые push и разрешить merge только через pull request;
+- включить «Require status checks to pass» с проверками `lint-and-build`, `unit-tests`,
+  `e2e-tests` (и по желанию `docker-build`);
+- включить «Require branches to be up to date before merging».
 
 ## Миграции
 

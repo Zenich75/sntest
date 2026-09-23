@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# A newer push to the same branch/PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # package.json requires >=22.12 (require(esm) for file-type & co.);
+  # '22' resolves to the latest 22.x.
+  NODE_VERSION: '22'
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # `npm run lint` passes --fix, which would silently rewrite files and
+      # pass in CI; lint:check only reports.
+      - run: npm run lint:check
+      - run: npm run build
+
+  unit-tests:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  e2e-tests:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sn_test_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sn_test_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Test-only values, not secrets. test/e2e-env.ts routes DB_*/REDIS_*
+      # through E2E_* (defaults: localhost, sn_test_e2e), forces
+      # STORAGE_DRIVER=local and an empty MAIL_HOST (emails are only logged),
+      # and the suites mock FilesService — so no AWS or SMTP is ever called.
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: sn_test_e2e
+      E2E_DB_HOST: localhost
+      E2E_DB_PORT: '5432'
+      E2E_DB_NAME: sn_test_e2e
+      REDIS_HOST: localhost
+      REDIS_PORT: '6379'
+      E2E_REDIS_HOST: localhost
+      E2E_REDIS_PORT: '6379'
+      SESSION_SECRET: ci-test-session-secret
+      CLIENT_URL: http://localhost:5173
+      STORAGE_DRIVER: local
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: ci-dummy-bucket
+      CLOUDFRONT_DOMAIN: https://ci-dummy.cloudfront.net
+      MAIL_HOST: ''
+      MAIL_FROM: ci@example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # test/global-setup.ts would also apply pending migrations; running the
+      # CLI first checks the real migration path (src/config/data-source.ts).
+      - run: npm run migration:run
+      - run: npm run test:e2e
+
+  docker-build:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build only, nothing is pushed (see cd.yml.example for publishing).
+      - run: docker build . -t sn-test:ci

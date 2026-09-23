@@ -615,3 +615,30 @@ unit 4/4, e2e 61/61, docker build — зелёные. Остальные `@nestj
 401 и удаление ключа, soft-auth (likes, профиль) как гость + удаление ключа, в том же запросе
 выдаётся рабочий CSRF-токен, пустая новая сессия не сохраняется, живые сессии не трогаются.
 Мутации: без middleware — 4 падения, без `saveOnlyIfUsed` — 2. Итого e2e 66/66, unit 4/4.
+
+---
+
+# Этап 15: CI (GitHub Actions)
+
+`.github/workflows/ci.yml`: `lint-and-build` → (`unit-tests`, `e2e-tests`, `docker-build`), push/PR в
+main/master, Node 22 + `cache: npm`, `npm ci`, concurrency cancel, `permissions: contents: read`.
+e2e — `services:` postgres:15-alpine (POSTGRES_DB=sn_test_e2e) + redis:7-alpine с healthcheck,
+`migration:run`, `test:e2e`; все env тестовые, секретов нет.
+
+**Сверка ТЗ:** все скрипты существуют, но `lint` = `eslint --fix` — в CI молча чинил бы и проходил;
+добавлен `lint:check` без `--fix`. e2e не ходят в AWS/SMTP (подтверждено: `e2e-env.ts` форсирует
+`STORAGE_DRIVER=local` и пустой `MAIL_HOST`, `FilesService` замокан) — править не пришлось. Важно:
+`e2e-env.ts` переписывает `DB_*` из `E2E_DB_*`, поэтому миграции в CI идут в ту же `sn_test_e2e`.
+
+**Найдено по пути:** не было `.dockerignore` — локальный `docker build` запекал в образ `.env` (с
+настоящим `SESSION_SECRET`) и хостовые `node_modules`. Добавлен; dev-образ пересобран (проверено:
+`.env` в образе больше нет), контекст сборки — 87 КБ.
+
+**Проверка:** actionlint 1.7.12 (через docker) — `ci.yml` чисто; в `cd.yml.example` нашёл и
+исправил YAML-ошибку (`"TODO: …"` в plain scalar). Полная симуляция CI: чистая копия репо без `.env`
+→ `npm ci` → lint:check, build, unit 4/4 → свежие контейнеры postgres/redis с теми же env и
+healthcheck → `migration:run` (обе миграции на пустую БД) → e2e 66/66 → `docker build`. Реальный
+прогон в GitHub Actions — после push.
+
+Задел: `.github/workflows/cd.yml.example` (неактивен; GHCR + AWS-заглушка), список секретов и
+рекомендации по branch protection — в README.

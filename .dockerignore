@@ -1,0 +1,12 @@
+# Never bake local secrets or host builds into the image.
+.env
+node_modules
+dist
+uploads
+coverage
+.git
+.github
+.idea
+.vscode
+.playwright-mcp
+*.log
