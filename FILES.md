@@ -41,7 +41,9 @@ STORAGE_DRIVER=local
 
 Files are written to `./uploads/<uuid>-<sanitized-original-name>` and served
 back at `http://localhost:<PORT>/uploads/<key>`. The `uploads/` directory is
-gitignored — it's created automatically on first upload.
+gitignored — it's created automatically on first upload. Under `docker compose` the
+directory lives in the `uploads_data` named volume (mounted at `/usr/src/app/uploads`), so
+files survive container recreation; `docker compose down -v` deletes them.
 
 ## Upload limits and manual test checklist
 
