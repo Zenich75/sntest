@@ -193,6 +193,17 @@ responses also for `email`/`isEmailConfirmed`.
   and the tables are emptied before each run. The `sn_test` dev database is never touched.
 - Connection settings can be overridden with `E2E_DB_HOST`, `E2E_DB_PORT`, `E2E_DB_NAME`
   (default `localhost:5432/sn_test_e2e`; user and password come from `.env`).
+`scripts/smoke-flow.sh` runs the same scenario against the live `docker compose` stack with nothing
+mocked: real JPEG/PNG/WebP files from `scripts/fixtures` go through `FilesService` into `./uploads`,
+and the script checks them on disk, in `public_file` and via their URLs, then follows comments, likes,
+follows and deletion with cascades (71 checks). It needs `curl`, `jq` and `STORAGE_DRIVER=local`,
+works on the dev `sn_test` database and deletes the two users it creates on exit. Registration is
+limited to 3 requests per minute, so wait a minute between runs.
+
+```bash
+docker compose up -d && scripts/smoke-flow.sh
+```
+
 - Sessions are kept in memory (MemoryStore), except in `orphaned-session.e2e-spec.ts`: that test
   checks Redis records under the `sn-test-e2e:sess:` prefix and cleans them up itself (address set by
   `E2E_REDIS_HOST`/`E2E_REDIS_PORT`, default `localhost:6379`). `FilesService` is mocked.

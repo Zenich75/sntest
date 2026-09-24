@@ -10,3 +10,4 @@ coverage
 .vscode
 .playwright-mcp
 *.log
+scripts
