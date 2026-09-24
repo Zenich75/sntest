@@ -12,6 +12,7 @@ services:
     depends_on:
       - postgres
       - redis
+      - mailpit
 
   postgres:
     image: postgres:15-alpine
@@ -30,6 +31,17 @@ services:
       - '6379:6379'
     volumes:
       - redis_data:/data
+
+  # Dev mail catcher: set MAIL_HOST=mailpit, MAIL_PORT=1025 in .env. Web UI and
+  # HTTP API (the Postman collection reads confirmation emails from it) on
+  # http://localhost:8026 — host port 8025 is often taken by other projects.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - '8026:8025'
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
 
 volumes:
   postgres_data:

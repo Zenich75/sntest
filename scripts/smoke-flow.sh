@@ -5,8 +5,10 @@
 # mocked: files really hit ./uploads and rows really hit the dev database.
 #
 # Usage: docker compose up -d && scripts/smoke-flow.sh
-# Needs: curl, jq, STORAGE_DRIVER=local. Registration is limited to 3 requests
-# per minute per IP, so wait a minute between runs (otherwise: 429).
+# Needs: curl, jq, STORAGE_DRIVER=local. Confirmation emails are read from
+# Mailpit ($MAILPIT) when MAIL_HOST=mailpit, otherwise from the app log.
+# Registration is limited to 3 requests per minute per IP, so wait a minute
+# between runs (otherwise: 429).
 # The two users it creates (alice<N>, bob<N>) are deleted on exit.
 set -u
 
@@ -14,6 +16,7 @@ ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 FIX=$ROOT/scripts/fixtures
 cd "$ROOT"
 API=${API:-http://localhost:3000}
+MAILPIT=${MAILPIT:-http://localhost:8026}
 UPLOADS=/usr/src/app/uploads
 RUN=$(date +%s | tail -c 7)
 A=alice$RUN; B=bob$RUN
@@ -69,10 +72,20 @@ req - 409 "register duplicate username" -X POST $API/auth/register -H 'Content-T
   -d "{\"username\":\"$A\",\"email\":\"other$RUN@example.com\",\"password\":\"password123\"}"
 req - 401 "login before email confirmation" -X POST $API/auth/login -H 'Content-Type: application/json' \
   -d "{\"username\":\"$A\",\"password\":\"password123\"}"
+# The confirmation link comes from Mailpit (MAIL_HOST=mailpit) or, when mail
+# isn't configured, from the app log.
+confirmation_token() {
+  local id
+  id=$(curl -s "$MAILPIT/api/v1/search?query=to:%22$1%22" | jq -r '.messages[0].ID // empty' 2>/dev/null)
+  if [ -n "$id" ]; then
+    curl -s "$MAILPIT/api/v1/message/$id" | jq -r .Text | grep -oE 'token=[a-f0-9]+' | cut -d= -f2
+  else
+    docker compose logs app 2>&1 | grep -A6 "$1" | grep -oE 'token=[a-f0-9]+' | tail -1 | cut -d= -f2
+  fi
+}
 sleep 1
-# MAIL_HOST is not configured in dev, so the confirmation link is only logged.
 for u in $A $B; do
-  tok=$(docker compose logs app 2>&1 | grep -A6 "$u@example.com" | grep -oE 'token=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2)
+  tok=$(confirmation_token "$u@example.com")
   req - 200 "confirm email $u" "$API/auth/confirm-email?token=$tok"
 done
 req - 400 "confirm with reused token" "$API/auth/confirm-email?token=$tok"

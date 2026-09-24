@@ -15,7 +15,7 @@ Requires Node.js ≥ 22.12 (see "ESM dependencies" below). The Docker image is b
 ```bash
 cp .env.example .env          # fill in the values (see below)
 npm install
-docker compose up -d          # app (port 3000) + postgres (5432) + redis (6379)
+docker compose up -d          # app (3000) + postgres (5432) + redis (6379) + mailpit UI (8026)
 
 # migrations run from the host, so DB_HOST is overridden to localhost
 DB_HOST=localhost npm run migration:run
@@ -39,7 +39,7 @@ then run `npm run start:dev`.
 | `SESSION_SECRET` | Secret used to sign the session cookie |
 | `STORAGE_DRIVER` | `s3` (default) or `local`: files are saved to `./uploads` and served at `/uploads` |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `CLOUDFRONT_DOMAIN` | S3/CloudFront (only for `STORAGE_DRIVER=s3`) |
-| `MAIL_HOST`, `MAIL_PORT`, `MAIL_USER`, `MAIL_PASSWORD`, `MAIL_FROM` | SMTP. If `MAIL_HOST` is empty or `changeme`, emails are written to the app log instead |
+| `MAIL_HOST`, `MAIL_PORT`, `MAIL_USER`, `MAIL_PASSWORD`, `MAIL_FROM` | SMTP. In dev, use the `mailpit` service: `MAIL_HOST=mailpit`, `MAIL_PORT=1025`, empty `MAIL_USER`, and read the emails at http://localhost:8026. If `MAIL_HOST` is empty or `changeme`, emails are written to the app log instead |
 | `CLIENT_URL` | Frontend origin, used for CORS and the email confirmation link |
 | `TRUST_PROXY` | `true` only when the app runs behind exactly one reverse proxy (nginx/ALB). Defaults to `false`, see "Rate limiting" |
 
@@ -49,7 +49,8 @@ S3/CloudFront setup is described in [FILES.md](FILES.md), curl examples for auth
 
 Auth is session-based: `POST /auth/login` sets the httpOnly `connect.sid` cookie, and the session is
 stored in Redis. Protected endpoints answer `401` without a session. Login works only after the email
-is confirmed: the link is sent by email (in dev it shows up in the log, `docker compose logs app`).
+is confirmed: the link is sent by email (in dev it lands in Mailpit, http://localhost:8026, or in the
+app log, `docker compose logs app`, when `MAIL_HOST` is not set).
 
 **Using Swagger UI:** run `POST /auth/login` right on the `/api/docs` page. The browser keeps the
 cookie, and every following "Try it out" request is made as that user. State-changing requests also
@@ -193,20 +194,28 @@ responses also for `email`/`isEmailConfirmed`.
   and the tables are emptied before each run. The `sn_test` dev database is never touched.
 - Connection settings can be overridden with `E2E_DB_HOST`, `E2E_DB_PORT`, `E2E_DB_NAME`
   (default `localhost:5432/sn_test_e2e`; user and password come from `.env`).
-`scripts/smoke-flow.sh` runs the same scenario against the live `docker compose` stack with nothing
-mocked: real JPEG/PNG/WebP files from `scripts/fixtures` go through `FilesService` into `./uploads`,
-and the script checks them on disk, in `public_file` and via their URLs, then follows comments, likes,
-follows and deletion with cascades (71 checks). It needs `curl`, `jq` and `STORAGE_DRIVER=local`,
-works on the dev `sn_test` database and deletes the two users it creates on exit. Registration is
-limited to 3 requests per minute, so wait a minute between runs.
-
-```bash
-docker compose up -d && scripts/smoke-flow.sh
-```
-
 - Sessions are kept in memory (MemoryStore), except in `orphaned-session.e2e-spec.ts`: that test
   checks Redis records under the `sn-test-e2e:sess:` prefix and cleans them up itself (address set by
   `E2E_REDIS_HOST`/`E2E_REDIS_PORT`, default `localhost:6379`). `FilesService` is mocked.
+
+### Against the running stack
+
+Two more checks run against the live `docker compose` stack and the dev `sn_test` database, with
+nothing mocked. Real JPEG/PNG/WebP files from `scripts/fixtures` go through `FilesService` into
+`./uploads`, and confirmation emails are read from Mailpit (see "Environment variables"). Registration
+is limited to 3 requests per minute, so wait a minute between runs of either one.
+
+```bash
+docker compose up -d
+scripts/smoke-flow.sh   # bash + curl + jq, 71 checks, deletes its two users on exit
+npm run test:postman    # Postman collection via newman, see postman/README.md
+```
+
+- `scripts/smoke-flow.sh` checks uploaded files on disk, in `public_file` and via their URLs, then
+  goes through comments, likes, follows and deletion with cascades. It needs `STORAGE_DRIVER=local`.
+- `postman/sn-test.postman_collection.json` covers all 25 operations (81 requests, 200+ assertions)
+  and also runs in the Postman app. Its `pm_*` users stay in the database, see
+  [postman/README.md](postman/README.md).
 
 ## ESM dependencies
 

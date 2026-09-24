@@ -1,0 +1,2313 @@
+{
+  "info": {
+    "_postman_id": "85adf941-853d-578c-9f78-732b7b5d27f0",
+    "name": "sn-test API",
+    "description": "Full automated check of the sn-test API against the running `docker compose` stack (needs the mailpit service and STORAGE_DRIVER=local). Creates two users per run (pm_alice_<runId>, pm_bob_<runId>), reads their confirmation emails from Mailpit, and walks auth, posts with real files, comments, likes, follows, profiles, search and deletion. Run the whole collection in order (Collection Runner or `npm run test:postman`); wait a minute between runs because of the rate limits. See postman/README.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Runs after every API request: no response may ever leak password hashes or",
+          "// email confirmation tokens, wherever they are nested. Skipped for the OpenAPI",
+          "// spec (its schemas describe `password`) and for Mailpit.",
+          "const ct = pm.response.headers.get('Content-Type') || '';",
+          "const url = pm.request.url.toString();",
+          "const isApiData = !url.includes('/api/docs') && !url.startsWith(pm.variables.get('mailpitUrl'));",
+          "if (isApiData && ct.includes('application/json') && pm.response.text()) {",
+          "  const leaks = [];",
+          "  (function walk(v, path) {",
+          "    if (Array.isArray(v)) return v.forEach((x, i) => walk(x, `${path}[${i}]`));",
+          "    if (v && typeof v === 'object') {",
+          "      for (const [k, x] of Object.entries(v)) {",
+          "        if (k === 'password' || k === 'emailConfirmationToken') leaks.push(`${path}.${k}`);",
+          "        walk(x, `${path}.${k}`);",
+          "      }",
+          "    }",
+          "  })(pm.response.json(), '$');",
+          "  pm.test('no password / emailConfirmationToken in response', () =>",
+          "    pm.expect(leaks, leaks.join(', ')).to.be.empty);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "GET / (hello)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('body', () => pm.expect(pm.response.text()).to.eql('Hello World!'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OpenAPI spec lists every endpoint",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/docs-json"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const paths = pm.response.json().paths;",
+                  "const ops = Object.entries(paths).flatMap(([p, m]) => Object.keys(m).map(x => `${x.toUpperCase()} ${p}`));",
+                  "pm.test('25 operations documented', () => pm.expect(ops).to.have.lengthOf(25));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "Register Alice",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{aliceName}}\",\n  \"email\": \"{{aliceEmail}}\",\n  \"password\": \"{{password}}\",\n  \"firstName\": \"Alice\",\n  \"lastName\": \"Postman\"\n}"
+            }
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh identities for every run, so the collection can be re-run against the",
+                  "// same database (wait a minute between runs: POST /auth/register allows 3/min).",
+                  "const runId = Date.now().toString(36);",
+                  "const c = pm.collectionVariables;",
+                  "c.set('runId', runId);",
+                  "c.set('aliceName', `pm_alice_${runId}`);",
+                  "c.set('bobName', `pm_bob_${runId}`);",
+                  "c.set('aliceEmail', `pm_alice_${runId}@example.com`);",
+                  "c.set('bobEmail', `pm_bob_${runId}@example.com`);",
+                  "c.set('password', 'password123');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const u = pm.response.json();",
+                  "pm.test('user created, email not confirmed yet', () => {",
+                  "  pm.expect(u.username).to.eql(pm.collectionVariables.get('aliceName'));",
+                  "  pm.expect(u.isEmailConfirmed).to.eql(false);",
+                  "  pm.expect(u.profile.firstName).to.eql('Alice');",
+                  "});",
+                  "pm.collectionVariables.set('aliceId', u.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register Bob",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{bobName}}\",\n  \"email\": \"{{bobEmail}}\",\n  \"password\": \"{{password}}\",\n  \"firstName\": \"Bob\",\n  \"lastName\": \"Postman\"\n}"
+            }
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const u = pm.response.json();",
+                  "pm.test('user created, email not confirmed yet', () => {",
+                  "  pm.expect(u.username).to.eql(pm.collectionVariables.get('bobName'));",
+                  "  pm.expect(u.isEmailConfirmed).to.eql(false);",
+                  "  pm.expect(u.profile.firstName).to.eql('Bob');",
+                  "});",
+                  "pm.collectionVariables.set('bobId', u.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register duplicate username → 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{aliceName}}\",\n  \"email\": \"other_{{runId}}@example.com\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 409', () => pm.response.to.have.status(409));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"already taken\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login before email confirmation → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{aliceName}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mailpit: find Alice's confirmation email",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{mailpitUrl}}/api/v1/search?query=to:\"{{aliceEmail}}\""
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const msgs = pm.response.json().messages;",
+                  "pm.test('exactly one email to Alice', () => pm.expect(msgs).to.have.lengthOf(1));",
+                  "pm.test('subject', () => pm.expect(msgs[0].Subject).to.eql('Confirm your sn-test account'));",
+                  "pm.collectionVariables.set('aliceMailId', msgs[0].ID);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mailpit: read Alice's token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{mailpitUrl}}/api/v1/message/{{aliceMailId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const m = pm.response.json().Text.match(/token=([a-f0-9]{64})/);",
+                  "pm.test('email contains a confirmation link', () => pm.expect(m).to.not.be.null);",
+                  "pm.collectionVariables.set('aliceToken', m[1]);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mailpit: find Bob's confirmation email",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{mailpitUrl}}/api/v1/search?query=to:\"{{bobEmail}}\""
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const msgs = pm.response.json().messages;",
+                  "pm.test('exactly one email to Bob', () => pm.expect(msgs).to.have.lengthOf(1));",
+                  "pm.test('subject', () => pm.expect(msgs[0].Subject).to.eql('Confirm your sn-test account'));",
+                  "pm.collectionVariables.set('bobMailId', msgs[0].ID);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mailpit: read Bob's token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{mailpitUrl}}/api/v1/message/{{bobMailId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const m = pm.response.json().Text.match(/token=([a-f0-9]{64})/);",
+                  "pm.test('email contains a confirmation link', () => pm.expect(m).to.not.be.null);",
+                  "pm.collectionVariables.set('bobToken', m[1]);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm Alice",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/auth/confirm-email?token={{aliceToken}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"confirmed\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm Bob",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/auth/confirm-email?token={{bobToken}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"confirmed\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reuse confirmation token → 400",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/auth/confirm-email?token={{bobToken}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"Invalid or expired\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login with wrong password → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{aliceName}}\",\n  \"password\": \"wrongpass1\"\n}"
+            }
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login Alice",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{aliceName}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('logged in as Alice', () => pm.expect(pm.response.json()).to.eql({",
+                  "  id: pm.collectionVariables.get('aliceId'),",
+                  "  username: pm.collectionVariables.get('aliceName'),",
+                  "}));",
+                  "pm.test('session cookie set', () => pm.expect(pm.cookies.has('connect.sid')).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "CSRF token for Alice",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/auth/csrf-token"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const t = pm.response.json().csrfToken;",
+                  "pm.test('token is 64 hex chars', () => pm.expect(t).to.match(/^[a-f0-9]{64}$/));",
+                  "pm.collectionVariables.set('aliceCsrf', t);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login Bob",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{bobUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{bobName}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('logged in as Bob', () => pm.expect(pm.response.json()).to.eql({",
+                  "  id: pm.collectionVariables.get('bobId'),",
+                  "  username: pm.collectionVariables.get('bobName'),",
+                  "}));",
+                  "pm.test('session cookie set', () => pm.expect(pm.cookies.has('connect.sid')).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "CSRF token for Bob",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/auth/csrf-token"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const t = pm.response.json().csrfToken;",
+                  "pm.test('token is 64 hex chars', () => pm.expect(t).to.match(/^[a-f0-9]{64}$/));",
+                  "pm.collectionVariables.set('bobCsrf', t);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Posts & files",
+      "item": [
+        {
+          "name": "Create post anonymously → 401",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/posts",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "x",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create post without CSRF header → 403",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/posts",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "x",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 403', () => pm.response.to.have.status(403));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"Invalid CSRF token\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create post with a PNG sent as image/jpeg → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/posts",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "spoofed",
+                  "type": "text"
+                },
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": "scripts/fixtures/chart.png",
+                  "contentType": "image/jpeg"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"\\u043d\\u0435 \\u0432\\u0456\\u0434\\u043f\\u043e\\u0432\\u0456\\u0434\\u0430\\u0454 \\u0437\\u0430\\u044f\\u0432\\u043b\\u0435\\u043d\\u043e\\u043c\\u0443 \\u0442\\u0438\\u043f\\u0443\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create post with files in a wrong field → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/posts",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "attachments",
+                  "type": "file",
+                  "src": "scripts/fixtures/chart.png",
+                  "contentType": "image/png"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"files\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice creates a post with 3 images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/posts",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "Postman trip {{runId}}",
+                  "type": "text"
+                },
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": "scripts/fixtures/mountain photo.jpg",
+                  "contentType": "image/jpeg"
+                },
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": "scripts/fixtures/chart.png",
+                  "contentType": "image/png"
+                },
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": "scripts/fixtures/dot.webp",
+                  "contentType": "image/webp"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const p = pm.response.json();",
+                  "pm.test('text and author', () => {",
+                  "  pm.expect(p.text).to.eql('Postman trip ' + pm.collectionVariables.get('runId'));",
+                  "  pm.expect(p.author.id).to.eql(pm.collectionVariables.get('aliceId'));",
+                  "});",
+                  "pm.test('3 files with key, url, mimeType, size', () => {",
+                  "  pm.expect(p.files).to.have.lengthOf(3);",
+                  "  p.files.forEach(f => pm.expect(f).to.include.all.keys('id', 'key', 'url', 'mimeType', 'size'));",
+                  "  pm.expect(p.files.map(f => f.mimeType).sort()).to.eql(['image/jpeg', 'image/png', 'image/webp']);",
+                  "});",
+                  "pm.test('space in the file name is sanitized', () =>",
+                  "  pm.expect(p.files.some(f => /-mountain-photo\\.jpg$/.test(f.key))).to.be.true);",
+                  "pm.collectionVariables.set('postId', p.id);",
+                  "const byType = t => p.files.find(f => f.mimeType === t).url;",
+                  "pm.collectionVariables.set('fileJpegUrl', byType('image/jpeg'));",
+                  "pm.collectionVariables.set('filePngUrl', byType('image/png'));",
+                  "pm.collectionVariables.set('fileWebpUrl', byType('image/webp'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Download uploaded JPEG",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{fileJpegUrl}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Content-Type image/jpeg', () =>",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('image/jpeg'));",
+                  "pm.test('non-empty body', () => pm.expect(pm.response.responseSize).to.be.above(100));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Download uploaded PNG",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{filePngUrl}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Content-Type image/png', () =>",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('image/png'));",
+                  "pm.test('non-empty body', () => pm.expect(pm.response.responseSize).to.be.above(100));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Download uploaded WEBP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{fileWebpUrl}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Content-Type image/webp', () =>",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('image/webp'));",
+                  "pm.test('non-empty body', () => pm.expect(pm.response.responseSize).to.be.above(100));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice creates a text-only post",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/posts",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "Second {{runId}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('no files', () => pm.expect(pm.response.json().files).to.eql([]));",
+                  "pm.collectionVariables.set('post2Id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Feed (Bob) contains Alice's posts, newest first",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/posts?limit=10"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const ids = pm.response.json().map(p => p.id);",
+                  "const c = pm.collectionVariables;",
+                  "pm.test('both posts, second one first', () =>",
+                  "  pm.expect(ids.indexOf(c.get('post2Id'))).to.be.within(0, ids.indexOf(c.get('postId')) - 1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Feed pagination limit=1&offset=1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts?limit=1&offset=1"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('one item', () => pm.expect(pm.response.json()).to.have.lengthOf(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Feed with limit=0 → 400",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts?limit=0"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get post anonymously",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/{{postId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "function expectNoEmail(v) {",
+                  "  const found = [];",
+                  "  (function walk(x) {",
+                  "    if (Array.isArray(x)) return x.forEach(walk);",
+                  "    if (x && typeof x === 'object') {",
+                  "      if ('email' in x || 'isEmailConfirmed' in x) found.push(x.username || x.id);",
+                  "      Object.values(x).forEach(walk);",
+                  "    }",
+                  "  })(v);",
+                  "  pm.expect(found, 'public response exposes email of: ' + found.join(', ')).to.be.empty;",
+                  "}",
+                  "",
+                  "const p = pm.response.json();",
+                  "pm.test('3 files, author, empty comments/likes', () => {",
+                  "  pm.expect(p.files).to.have.lengthOf(3);",
+                  "  pm.expect(p.author.username).to.eql(pm.collectionVariables.get('aliceName'));",
+                  "  pm.expect(p.comments).to.eql([]);",
+                  "  pm.expect(p.likes).to.eql([]);",
+                  "});",
+                  "pm.test('author email not exposed', () => expectNoEmail(p));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice's posts (/posts/user/:userId)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/posts/user/{{aliceId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('total 2, default paging', () => {",
+                  "  pm.expect(r.total).to.eql(2);",
+                  "  pm.expect(r.items).to.have.lengthOf(2);",
+                  "  pm.expect(r).to.include({ limit: 20, offset: 0 });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get missing post → 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/00000000-0000-4000-8000-000000000000"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"Post not found\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get post by non-uuid → 400",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/not-a-uuid"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"uuid\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Comments",
+      "item": [
+        {
+          "name": "Comment anonymously → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/posts/{{postId}}/comments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"hi\"\n}"
+            }
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Empty comment → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}/comments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob comments on Alice's post",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}/comments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Great photos!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const c = pm.response.json();",
+                  "pm.test('text and author', () => {",
+                  "  pm.expect(c.text).to.eql('Great photos!');",
+                  "  pm.expect(c.author.id).to.eql(pm.collectionVariables.get('bobId'));",
+                  "});",
+                  "pm.collectionVariables.set('bobCommentId', c.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice replies",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/posts/{{postId}}/comments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Thanks, Bob\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('aliceCommentId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Comment on missing post → 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/00000000-0000-4000-8000-000000000000/comments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"x\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List comments anonymously (oldest first)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/{{postId}}/comments"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "function expectNoEmail(v) {",
+                  "  const found = [];",
+                  "  (function walk(x) {",
+                  "    if (Array.isArray(x)) return x.forEach(walk);",
+                  "    if (x && typeof x === 'object') {",
+                  "      if ('email' in x || 'isEmailConfirmed' in x) found.push(x.username || x.id);",
+                  "      Object.values(x).forEach(walk);",
+                  "    }",
+                  "  })(v);",
+                  "  pm.expect(found, 'public response exposes email of: ' + found.join(', ')).to.be.empty;",
+                  "}",
+                  "",
+                  "const r = pm.response.json();",
+                  "pm.test('2 comments: Bob, then Alice', () => {",
+                  "  pm.expect(r.total).to.eql(2);",
+                  "  pm.expect(r.items.map(c => c.text)).to.eql(['Great photos!', 'Thanks, Bob']);",
+                  "});",
+                  "pm.test('authors without email', () => expectNoEmail(r));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice deletes Bob's comment → 403",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/comments/{{bobCommentId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 403', () => pm.response.to.have.status(403));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"your own comments\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Likes",
+      "item": [
+        {
+          "name": "Like anonymously → 401",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/posts/{{postId}}/likes"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob likes the post",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('bobLikeId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob likes again → same like (idempotent)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('returns the existing like', () =>",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('bobLikeId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice likes her own post",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/posts/{{postId}}/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Likes as Bob: count 2, likedByMe",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/posts/{{postId}}/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('count 2, likedByMe true', () => pm.expect(pm.response.json()).to.eql({ count: 2, likedByMe: true }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Likes anonymously: likedByMe false",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/{{postId}}/likes"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('count 2, likedByMe false', () => pm.expect(pm.response.json()).to.eql({ count: 2, likedByMe: false }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Like missing post → 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/00000000-0000-4000-8000-000000000000/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob unlikes",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob unlikes again → 404",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"Like not found\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Likes as Bob after unlike",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/posts/{{postId}}/likes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('count 1, likedByMe false', () => pm.expect(pm.response.json()).to.eql({ count: 1, likedByMe: false }));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Follows, profiles, search",
+      "item": [
+        {
+          "name": "Bob follows himself → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/users/{{bobId}}/follow"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Follow missing user → 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/users/00000000-0000-4000-8000-000000000000/follow"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"User not found\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob follows Alice",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/users/{{aliceId}}/follow"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('followId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob follows Alice again → same follow (idempotent)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/users/{{aliceId}}/follow"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('returns the existing follow', () =>",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('followId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice's profile as Bob",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/users/{{aliceId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "function expectNoEmail(v) {",
+                  "  const found = [];",
+                  "  (function walk(x) {",
+                  "    if (Array.isArray(x)) return x.forEach(walk);",
+                  "    if (x && typeof x === 'object') {",
+                  "      if ('email' in x || 'isEmailConfirmed' in x) found.push(x.username || x.id);",
+                  "      Object.values(x).forEach(walk);",
+                  "    }",
+                  "  })(v);",
+                  "  pm.expect(found, 'public response exposes email of: ' + found.join(', ')).to.be.empty;",
+                  "}",
+                  "",
+                  "const u = pm.response.json();",
+                  "pm.test('counters and isFollowedByMe', () => {",
+                  "  pm.expect(u.username).to.eql(pm.collectionVariables.get('aliceName'));",
+                  "  pm.expect(u).to.include({ followersCount: 1, followingCount: 0, isFollowedByMe: true });",
+                  "  pm.expect(u.profile).to.include({ firstName: 'Alice', lastName: 'Postman' });",
+                  "});",
+                  "pm.test('no email in public profile', () => expectNoEmail(u));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice's profile anonymously: isFollowedByMe false",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/{{aliceId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('isFollowedByMe false', () => pm.expect(pm.response.json().isFollowedByMe).to.eql(false));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Profile of missing user → 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/00000000-0000-4000-8000-000000000000"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice's followers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/{{aliceId}}/followers"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "function expectNoEmail(v) {",
+                  "  const found = [];",
+                  "  (function walk(x) {",
+                  "    if (Array.isArray(x)) return x.forEach(walk);",
+                  "    if (x && typeof x === 'object') {",
+                  "      if ('email' in x || 'isEmailConfirmed' in x) found.push(x.username || x.id);",
+                  "      Object.values(x).forEach(walk);",
+                  "    }",
+                  "  })(v);",
+                  "  pm.expect(found, 'public response exposes email of: ' + found.join(', ')).to.be.empty;",
+                  "}",
+                  "",
+                  "const r = pm.response.json();",
+                  "pm.test('only Bob', () => pm.expect(r.map(u => u.username)).to.eql([pm.collectionVariables.get('bobName')]));",
+                  "pm.test('no emails', () => expectNoEmail(r));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob's following",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/{{bobId}}/following"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('only Alice', () =>",
+                  "  pm.expect(pm.response.json().map(u => u.username)).to.eql([pm.collectionVariables.get('aliceName')]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Profile by username",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/by-username/{{aliceName}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Alice', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('aliceId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Profile by unknown username → 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/by-username/pm_nobody_{{runId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice's posts (/users/:id/posts)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/{{aliceId}}/posts"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('total 2', () => pm.expect(pm.response.json().total).to.eql(2));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search users by username",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/search/users?query={{aliceName}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "function expectNoEmail(v) {",
+                  "  const found = [];",
+                  "  (function walk(x) {",
+                  "    if (Array.isArray(x)) return x.forEach(walk);",
+                  "    if (x && typeof x === 'object') {",
+                  "      if ('email' in x || 'isEmailConfirmed' in x) found.push(x.username || x.id);",
+                  "      Object.values(x).forEach(walk);",
+                  "    }",
+                  "  })(v);",
+                  "  pm.expect(found, 'public response exposes email of: ' + found.join(', ')).to.be.empty;",
+                  "}",
+                  "",
+                  "const r = pm.response.json();",
+                  "pm.test('finds exactly Alice', () => {",
+                  "  pm.expect(r.total).to.eql(1);",
+                  "  pm.expect(r.items[0].username).to.eql(pm.collectionVariables.get('aliceName'));",
+                  "});",
+                  "pm.test('no emails', () => expectNoEmail(r));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search with LIKE wildcards matches literally",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/search/users?query=pm_%25_{{runId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('\"%\" is not a wildcard', () => pm.expect(pm.response.json().total).to.eql(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob unfollows Alice",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/users/{{aliceId}}/follow"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unfollow again → 404",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/users/{{aliceId}}/follow"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice's profile after unfollow",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bobUrl}}/users/{{aliceId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('followersCount 0, isFollowedByMe false', () =>",
+                  "  pm.expect(pm.response.json()).to.include({ followersCount: 0, isFollowedByMe: false }));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6. Deletion & logout",
+      "item": [
+        {
+          "name": "Bob deletes his comment",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/comments/{{bobCommentId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob deletes Alice's post → 403",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 403', () => pm.response.to.have.status(403));",
+                  "pm.test('message', () => pm.expect(JSON.stringify(pm.response.json().message)).to.include(\"your own posts\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob logs out",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              }
+            ],
+            "url": "{{bobUrl}}/auth/logout"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob after logout → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{bobCsrf}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{bobUrl}}/posts/{{postId}}/comments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"x\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice deletes the post with files",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/posts/{{postId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Deleted post → 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/{{postId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Its comments are gone (post 404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/{{postId}}/comments"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Deleted file is gone from disk (JPEG)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{fileJpegUrl}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Deleted file is gone from disk (PNG)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{filePngUrl}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Deleted file is gone from disk (WEBP)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{fileWebpUrl}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice deletes the text-only post",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/posts/{{post2Id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice has no posts left",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/posts/user/{{aliceId}}"
+          },
+          "protocolProfileBehavior": {
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('total 0', () => pm.expect(pm.response.json().total).to.eql(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice logs out",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{aliceCsrf}}"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/logout"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": []
+}
