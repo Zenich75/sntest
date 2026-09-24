@@ -56,7 +56,15 @@ export class PostsService {
       files: uploadedFiles,
     });
 
-    return this.postRepository.save(post);
+    // The cascade inserts the post and its public_file rows in one
+    // transaction, so a failed save leaves no rows behind — only the stored
+    // files, which are removed here.
+    try {
+      return await this.postRepository.save(post);
+    } catch (error) {
+      await this.filesService.deleteStoredFiles(uploadedFiles);
+      throw error;
+    }
   }
 
   async findOne(id: string): Promise<Post> {

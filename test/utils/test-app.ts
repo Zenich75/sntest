@@ -19,6 +19,7 @@ export interface TestApp {
   filesServiceMock: {
     uploadManyPublicFiles: jest.Mock;
     deletePublicFile: jest.Mock;
+    deleteStoredFiles: jest.Mock;
   };
 }
 
@@ -45,6 +46,7 @@ export async function createTestApp({
   const filesServiceMock = {
     uploadManyPublicFiles: jest.fn().mockResolvedValue([]),
     deletePublicFile: jest.fn().mockResolvedValue(undefined),
+    deleteStoredFiles: jest.fn().mockResolvedValue(undefined),
   };
 
   let builder = Test.createTestingModule({ imports: [AppModule] })

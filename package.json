@@ -99,8 +99,16 @@
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
+      "^.+\\.(t|j)s$": [
+        "<rootDir>/../test/esm-to-cjs.transformer.js",
+        {
+          "tsconfig": "<rootDir>/../test/tsconfig.e2e.json"
+        }
+      ]
     },
+    "transformIgnorePatterns": [
+      "node_modules/(?!(@nestjs/(config|typeorm|passport)|uuid|file-type|strtok3|token-types|@tokenizer/inflate|uint8array-extras|@borewit/text-codec)/)"
+    ],
     "collectCoverageFrom": [
       "**/*.(t|j)s"
     ],

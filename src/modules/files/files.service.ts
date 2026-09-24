@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs';
 import { join } from 'path';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   DeleteObjectCommand,
@@ -17,6 +17,7 @@ type StorageDriver = 's3' | 'local';
 
 @Injectable()
 export class FilesService {
+  private readonly logger = new Logger(FilesService.name);
   private readonly driver: StorageDriver;
   private readonly s3Client: S3Client | null;
 
@@ -31,6 +32,8 @@ export class FilesService {
         : null;
   }
 
+  // Writes the file to storage and returns an *unsaved* PublicFile: the row is
+  // inserted by the owner's cascade save, in the same transaction as the owner.
   async uploadPublicFile(file: Express.Multer.File): Promise<PublicFile> {
     const key = this.buildKey(file.originalname);
     const url =
@@ -38,24 +41,52 @@ export class FilesService {
         ? await this.saveLocally(key, file)
         : await this.uploadToS3(key, file);
 
-    const publicFile = this.publicFileRepository.create({
+    return this.publicFileRepository.create({
       key,
       url,
       mimeType: file.mimetype,
       size: file.size,
     });
-
-    return this.publicFileRepository.save(publicFile);
   }
 
-  uploadManyPublicFiles(
+  // All or nothing: if any upload fails, the ones that succeeded are removed
+  // from storage before the error is rethrown.
+  async uploadManyPublicFiles(
     files: Express.Multer.File[] | undefined,
   ): Promise<PublicFile[]> {
     if (!files || files.length === 0) {
-      return Promise.resolve([]);
+      return [];
     }
 
-    return Promise.all(files.map((file) => this.uploadPublicFile(file)));
+    const results = await Promise.allSettled(
+      files.map((file) => this.uploadPublicFile(file)),
+    );
+    const uploaded = results
+      .filter((r) => r.status === 'fulfilled')
+      .map((r) => r.value);
+    const failed = results.find((r) => r.status === 'rejected');
+
+    if (failed) {
+      await this.deleteStoredFiles(uploaded);
+      throw failed.reason;
+    }
+
+    return uploaded;
+  }
+
+  // Removes files from storage only (no DB rows involved) — the rollback for
+  // uploads whose owner was never saved. Best effort: a failure is logged and
+  // must not mask the error that caused the rollback.
+  async deleteStoredFiles(files: PublicFile[]): Promise<void> {
+    await Promise.all(
+      files.map((file) =>
+        this.deleteFromStorage(file.key).catch((error: unknown) =>
+          this.logger.warn(
+            `Failed to delete orphaned upload "${file.key}": ${String(error)}`,
+          ),
+        ),
+      ),
+    );
   }
 
   async deletePublicFile(id: string): Promise<void> {
@@ -67,20 +98,21 @@ export class FilesService {
       return;
     }
 
+    await this.deleteFromStorage(publicFile.key);
+    await this.publicFileRepository.remove(publicFile);
+  }
+
+  private async deleteFromStorage(key: string): Promise<void> {
     if (this.driver === 'local') {
-      await fs
-        .unlink(join(LOCAL_UPLOADS_DIR, publicFile.key))
-        .catch(() => undefined);
+      await fs.unlink(join(LOCAL_UPLOADS_DIR, key)).catch(() => undefined);
     } else {
       await this.s3Client!.send(
         new DeleteObjectCommand({
           Bucket: process.env.AWS_S3_BUCKET,
-          Key: publicFile.key,
+          Key: key,
         }),
       );
     }
-
-    await this.publicFileRepository.remove(publicFile);
   }
 
   private buildKey(originalName: string): string {
