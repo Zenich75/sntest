@@ -6,9 +6,9 @@ services:
     env_file:
       - .env
     volumes:
-      # STORAGE_DRIVER=local writes here; without a volume the files are lost
-      # whenever the container is recreated.
-      - uploads_data:/usr/src/app/uploads
+      # STORAGE_DRIVER=local writes here. Bind-mounted to ./uploads so the files
+      # survive container recreation and are visible on the host.
+      - ./uploads:/usr/src/app/uploads
     depends_on:
       - postgres
       - redis
@@ -34,4 +34,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  uploads_data:
