@@ -21,6 +21,10 @@ npm run test:postman
 This runs [newman](https://github.com/postmanlabs/newman) through `npx`, so nothing extra is installed.
 It exits non-zero if any assertion fails.
 
+CI runs the same command in the `postman-tests` job of `.github/workflows/ci.yml`. The job brings up
+the stack with `docker compose` and a test `.env`, applies migrations, and prints the app and Mailpit
+logs if the run fails.
+
 In the Postman app: import the collection and `local.postman_environment.json`, select the
 **sn-test local** environment, and set *Settings → General → Working directory* to the repository
 root: the upload requests attach `scripts/fixtures/*` by relative path. Then run the whole collection

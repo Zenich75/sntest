@@ -213,8 +213,8 @@ npm run test:postman    # Postman collection via newman, see postman/README.md
 
 - `scripts/smoke-flow.sh` checks uploaded files on disk, in `public_file` and via their URLs, then
   goes through comments, likes, follows and deletion with cascades. It needs `STORAGE_DRIVER=local`.
-- `postman/sn-test.postman_collection.json` covers all 25 operations (81 requests, 200+ assertions)
-  and also runs in the Postman app. Its `pm_*` users stay in the database, see
+- `postman/sn-test.postman_collection.json` covers all 25 operations (81 requests, 200+ assertions),
+  also runs in the Postman app, and runs in CI (`postman-tests` job, see "CI/CD"). Its `pm_*` users stay in the database, see
   [postman/README.md](postman/README.md).
 
 ## ESM dependencies
@@ -247,12 +247,13 @@ GitHub Actions, file `.github/workflows/ci.yml`. Runs on push and pull request t
 | `lint-and-build` | | `npm ci`, `npm run lint:check`, `npm run build` |
 | `unit-tests` | lint-and-build | `npm test` |
 | `e2e-tests` | lint-and-build | `postgres:15-alpine` + `redis:7-alpine` services with health checks, `npm run migration:run`, `npm run test:e2e` |
+| `postman-tests` | lint-and-build | writes a test `.env`, `docker compose up -d --build` (app, postgres, redis, mailpit), migrations from the runner, `npm run test:postman`; container logs on failure |
 | `docker-build` | lint-and-build | `docker build . -t sn-test:ci`, nothing is published |
 
 - Node 22, `npm ci` and the npm cache (`actions/setup-node`, `cache: npm`) keyed on `package-lock.json`.
 - CI uses `lint:check` rather than `lint`: `npm run lint` runs with `--fix`, so in CI it would
   silently fix the errors and pass.
-- CI needs no secrets. All variables in the e2e job are test values set directly in the workflow.
+- CI needs no secrets. All variables in the e2e and postman jobs are test values set directly in the workflow.
   AWS and SMTP are never called in the tests: `test/e2e-env.ts` switches to local storage and turns
   off email sending, and `FilesService` is replaced with a mock.
 - `.dockerignore` keeps `.env`, `node_modules` and `dist` from the build machine out of the image.
@@ -276,8 +277,8 @@ reviewers in the repository settings.
 **Recommended branch protection** (Settings → Branches → rule for `main`). The rule is not
 configured automatically:
 - block direct pushes and allow merging only through pull requests;
-- enable "Require status checks to pass" with the `lint-and-build`, `unit-tests` and `e2e-tests`
-  checks (and optionally `docker-build`);
+- enable "Require status checks to pass" with the `lint-and-build`, `unit-tests`, `e2e-tests` and
+  `postman-tests` checks (and optionally `docker-build`);
 - enable "Require branches to be up to date before merging".
 
 ## Migrations

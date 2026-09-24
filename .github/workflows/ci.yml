@@ -109,6 +109,54 @@ jobs:
       - run: npm run migration:run
       - run: npm run test:e2e
 
+  # The Postman collection against the real docker compose stack (app image,
+  # postgres, redis, mailpit): nothing is mocked, files go to ./uploads and
+  # confirmation emails are read from Mailpit. See postman/README.md.
+  postman-tests:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      # Test-only values for docker compose (env_file + ${DB_*} in the
+      # postgres service), not secrets.
+      - name: Write .env
+        run: |
+          cat > .env <<'EOF'
+          PORT=3000
+          DB_HOST=postgres
+          DB_PORT=5432
+          DB_USERNAME=postgres
+          DB_PASSWORD=postgres
+          DB_NAME=sn_test
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          SESSION_SECRET=ci-postman-session-secret
+          STORAGE_DRIVER=local
+          MAIL_HOST=mailpit
+          MAIL_PORT=1025
+          MAIL_FROM=ci@example.com
+          CLIENT_URL=http://localhost:5173
+          TRUST_PROXY=false
+          EOF
+          mkdir -p uploads
+      - run: docker compose up -d --build
+      - run: npm ci
+      - name: Wait for postgres
+        run: timeout 60 sh -c 'until docker compose exec -T postgres pg_isready -U postgres -d sn_test; do sleep 2; done'
+      # Runs on the host, so DB_HOST is overridden (dotenv doesn't override
+      # variables that are already set).
+      - run: DB_HOST=localhost npm run migration:run
+      - name: Wait for the app
+        run: timeout 60 sh -c 'until curl -sf -o /dev/null http://localhost:3000/auth/csrf-token; do sleep 2; done'
+      - run: npm run test:postman
+      - name: Container logs
+        if: failure()
+        run: docker compose logs app mailpit
+
   docker-build:
     needs: lint-and-build
     runs-on: ubuntu-latest
