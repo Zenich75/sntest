@@ -24,3 +24,6 @@ npm-debug.log*
 
 # local browser-automation artifacts
 .playwright-mcp
+
+# local progress notes
+/steps-ready.md

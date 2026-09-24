@@ -1,0 +1,82 @@
+Project sn_test {
+  database_type: 'PostgreSQL'
+  Note: 'sn-test social network API. Sessions are stored in Redis, not in PostgreSQL.'
+}
+
+Table user {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  username varchar [not null, unique]
+  email varchar [not null, unique]
+  password varchar [not null, note: 'bcrypt hash']
+  isEmailConfirmed boolean [not null, default: false]
+  emailConfirmationToken varchar [null]
+  createdAt timestamp [not null, default: `now()`]
+  updatedAt timestamp [not null, default: `now()`]
+}
+
+Table profile {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  firstName varchar [null]
+  lastName varchar [null]
+  bio text [null]
+  userId uuid [unique]
+  avatarId uuid [null]
+}
+
+Table post {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  text text [null]
+  createdAt timestamp [not null, default: `now()`]
+  updatedAt timestamp [not null, default: `now()`]
+  authorId uuid
+}
+
+Table public_file {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  key varchar [not null]
+  url varchar [not null]
+  mimeType varchar [not null]
+  size integer [not null]
+  postId uuid [null]
+}
+
+Table comment {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  text text [not null]
+  createdAt timestamp [not null, default: `now()`]
+  authorId uuid
+  postId uuid
+}
+
+Table like {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  createdAt timestamp [not null, default: `now()`]
+  userId uuid
+  postId uuid
+
+  indexes {
+    (userId, postId) [unique]
+  }
+}
+
+Table follow {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  createdAt timestamp [not null, default: `now()`]
+  followerId uuid
+  followingId uuid
+
+  indexes {
+    (followerId, followingId) [unique]
+  }
+}
+
+Ref: profile.userId - user.id [delete: cascade]
+Ref: profile.avatarId > public_file.id [delete: set null]
+Ref: post.authorId > user.id [delete: cascade]
+Ref: public_file.postId > post.id [delete: cascade]
+Ref: comment.authorId > user.id [delete: cascade]
+Ref: comment.postId > post.id [delete: cascade]
+Ref: like.userId > user.id [delete: cascade]
+Ref: like.postId > post.id [delete: cascade]
+Ref: follow.followerId > user.id [delete: cascade]
+Ref: follow.followingId > user.id [delete: cascade]

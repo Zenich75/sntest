@@ -270,6 +270,9 @@ DB_HOST=localhost npm run migration:run
 DB_HOST=localhost npm run migration:revert
 ```
 
+Database diagram: [dbdiagram.io](https://dbdiagram.io/d/sn-test-6ab4e70e586942561280b3f8)
+(source: [`docs/schema.dbml`](docs/schema.dbml); update it together with new migrations).
+
 ## Structure
 
 ```
